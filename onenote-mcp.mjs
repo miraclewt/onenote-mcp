@@ -3,30 +3,27 @@
 import { McpServer } from './typescript-sdk/dist/esm/server/mcp.js';
 import { Client } from '@microsoft/microsoft-graph-client';
 import { StdioServerTransport } from './typescript-sdk/dist/esm/server/stdio.js';
+import { PublicClientApplication } from '@azure/msal-node';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
-import { DeviceCodeCredential } from '@azure/identity';
 import fetch from 'node-fetch';
 import { z } from 'zod';
 
-// Load environment variables
 dotenv.config();
 
-// Get the current file's directory
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Path for storing the access token
 const tokenFilePath = path.join(__dirname, '.access-token.txt');
+const msalCachePath = path.join(__dirname, '.msal-cache.json');
 
-// Create the MCP server
 const server = new McpServer(
-  { 
+  {
     name: "onenote",
     version: "1.0.0",
-    description: "OneNote MCP Server" 
+    description: "OneNote MCP Server"
   },
   {
     capabilities: {
@@ -37,152 +34,141 @@ const server = new McpServer(
   }
 );
 
-// Try to read the stored access token
 let accessToken = null;
-try {
-  if (fs.existsSync(tokenFilePath)) {
-    const tokenData = fs.readFileSync(tokenFilePath, 'utf8');
-    try {
-      // Try to parse as JSON first (new format)
-      const parsedToken = JSON.parse(tokenData);
-      accessToken = parsedToken.token;
-    } catch (parseError) {
-      // Fall back to using the raw token (old format)
-      accessToken = tokenData;
+let graphClient = null;
+
+const clientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e';
+const scopes = ['Notes.Read.All', 'Notes.ReadWrite.All', 'User.Read'];
+
+const msalApp = new PublicClientApplication({
+  auth: {
+    clientId: clientId,
+    authority: 'https://login.microsoftonline.com/common'
+  },
+  cache: {
+    cachePlugin: {
+      beforeCacheAccess: async (cacheContext) => {
+        try {
+          const cache = JSON.parse(fs.readFileSync(msalCachePath, 'utf8'));
+          cacheContext.tokenCache.deserialize(cache);
+        } catch {}
+      },
+      afterCacheAccess: async (cacheContext) => {
+        if (cacheContext.cacheHasChanged) {
+          fs.writeFileSync(msalCachePath, JSON.stringify(cacheContext.tokenCache.serialize()));
+        }
+      }
     }
   }
-} catch (error) {
-  console.error('Error reading access token file:', error.message);
+});
+
+async function acquireTokenFromCache() {
+  try {
+    const accounts = await msalApp.getTokenCache().getAllAccounts();
+    if (accounts.length > 0) {
+      const response = await msalApp.acquireTokenSilent({
+        scopes: scopes,
+        account: accounts[0]
+      });
+      return response.accessToken;
+    }
+  } catch (error) {
+    console.error('Silent token acquisition failed:', error.message);
+  }
+  return null;
 }
 
-// Alternatively, check if token is in environment variables
-if (!accessToken && process.env.GRAPH_ACCESS_TOKEN) {
+async function acquireTokenFromDeviceCode() {
+  const response = await msalApp.acquireTokenByDeviceCode({
+    scopes: scopes,
+    deviceCodeCallback: (response) => {
+      console.error('\n' + response.message);
+    }
+  });
+  return response.accessToken;
+}
+
+function readSavedToken() {
+  try {
+    if (fs.existsSync(tokenFilePath)) {
+      const tokenData = fs.readFileSync(tokenFilePath, 'utf8');
+      try {
+        const parsedToken = JSON.parse(tokenData);
+        return parsedToken.token;
+      } catch {
+        return tokenData;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+if (process.env.GRAPH_ACCESS_TOKEN) {
   accessToken = process.env.GRAPH_ACCESS_TOKEN;
 }
 
-let graphClient = null;
+function initGraphClient(token) {
+  graphClient = Client.initWithMiddleware({
+    authProvider: {
+      getAccessToken: async () => token
+    }
+  });
+}
 
-// Client ID for Microsoft Graph API access
-const clientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'; // Microsoft Graph Explorer client ID
-const scopes = ['Notes.Read.All', 'Notes.ReadWrite.All', 'User.Read'];
-
-// Function to ensure Graph client is created
 async function ensureGraphClient() {
-  if (!graphClient) {
-    // Read token from file if it exists
-    try {
-      if (fs.existsSync(tokenFilePath)) {
-        const tokenData = fs.readFileSync(tokenFilePath, 'utf8');
-        try {
-          // Try to parse as JSON first (new format)
-          const parsedToken = JSON.parse(tokenData);
-          accessToken = parsedToken.token;
-        } catch (parseError) {
-          // Fall back to using the raw token (old format)
-          accessToken = tokenData;
-        }
-      }
-    } catch (error) {
-      console.error("Error reading token file:", error);
-    }
+  if (graphClient) return graphClient;
 
-    if (!accessToken) {
-      throw new Error("Access token not found. Please save access token first.");
-    }
-
-    // Create Microsoft Graph client
-    graphClient = Client.init({
-      authProvider: (done) => {
-        done(null, accessToken);
-      }
-    });
-  }
-  return graphClient;
-}
-
-// Create graph client with device code auth or access token
-async function createGraphClient() {
   if (accessToken) {
-    // Use access token if available
-    graphClient = Client.initWithMiddleware({
-      authProvider: {
-        getAccessToken: async () => {
-          return accessToken;
-        }
-      }
-    });
-    return { type: 'token', client: graphClient };
-  } else {
-    // Use device code flow
-    const credential = new DeviceCodeCredential({
-      clientId: clientId,
-      userPromptCallback: (info) => {
-        // This will be shown to the user with the URL and code
-        console.error('\n' + info.message);
-      }
-    });
-
-    try {
-      // Get an access token using device code flow
-      const tokenResponse = await credential.getToken(scopes);
-      
-      // Save the token for future use
-      accessToken = tokenResponse.token;
-      fs.writeFileSync(tokenFilePath, JSON.stringify({ token: accessToken }));
-      
-      // Initialize Graph client with the token
-      graphClient = Client.initWithMiddleware({
-        authProvider: {
-          getAccessToken: async () => {
-            return accessToken;
-          }
-        }
-      });
-      
-      return { type: 'device_code', client: graphClient };
-    } catch (error) {
-      console.error('Authentication error:', error);
-      throw new Error(`Authentication failed: ${error.message}`);
-    }
+    initGraphClient(accessToken);
+    return graphClient;
   }
+
+  let token = await acquireTokenFromCache();
+  if (token) {
+    accessToken = token;
+    initGraphClient(token);
+    return graphClient;
+  }
+
+  token = readSavedToken();
+  if (token) {
+    accessToken = token;
+    initGraphClient(token);
+    return graphClient;
+  }
+
+  throw new Error("Access token not found. Use the 'authenticate' tool to sign in.");
 }
 
-// Tool for starting authentication flow
+// Tool: authenticate
 server.tool(
   "authenticate",
-  "Start the authentication flow with Microsoft Graph",
+  "Sign in to Microsoft OneNote. You will receive a URL and code to complete login in your browser.",
   async () => {
     try {
-      const result = await createGraphClient();
-      if (result.type === 'device_code') {
-        return { 
-          content: [
-            {
-              type: "text",
-              text: "Authentication started. Please check the console for the URL and code."
-            }
-          ]
-        };
-      } else {
-        return { 
-          content: [
-            {
-              type: "text",
-              text: "Already authenticated with an access token."
-            }
-          ]
-        };
-      }
+      const token = await acquireTokenFromDeviceCode();
+      accessToken = token;
+      initGraphClient(token);
+      fs.writeFileSync(tokenFilePath, JSON.stringify({ token: accessToken }));
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Authentication successful! You are now signed in to OneNote."
+          }
+        ]
+      };
     } catch (error) {
-      console.error("Error in authentication:", error);
+      console.error("Authentication error:", error);
       throw new Error(`Authentication failed: ${error.message}`);
     }
   }
 );
 
+// Tool: saveAccessToken
 server.tool(
   "saveAccessToken",
-  "Save a Microsoft Graph access token for later use. Get a token from https://developer.microsoft.com/graph/graph-explorer by signing in and running GET https://graph.microsoft.com/v1.0/me, then copy the access token from the Access token tab.",
+  "Save a Microsoft Graph access token manually. Get a token from https://developer.microsoft.com/graph/graph-explorer",
   {
     token: z.string().describe("Microsoft Graph access token")
   },
@@ -198,14 +184,13 @@ server.tool(
 
       accessToken = token;
       graphClient = testClient;
-      const tokenData = JSON.stringify({ token: accessToken });
-      fs.writeFileSync(tokenFilePath, tokenData);
+      fs.writeFileSync(tokenFilePath, JSON.stringify({ token: accessToken }));
 
       return {
         content: [
           {
             type: "text",
-            text: `Access token saved successfully. Authenticated as: ${me.displayName} (${me.userPrincipalName || me.mail || "unknown email"})`
+            text: `Access token saved. Authenticated as: ${me.displayName} (${me.userPrincipalName || me.mail || "unknown"})`
           }
         ]
       };
@@ -216,15 +201,14 @@ server.tool(
   }
 );
 
-// Tool for listing all notebooks
+// Tool: listNotebooks
 server.tool(
   "listNotebooks",
   "List all OneNote notebooks",
-  async (params) => {
+  async () => {
     try {
       await ensureGraphClient();
       const response = await graphClient.api("/me/onenote/notebooks").get();
-      // Return content as an array of text items
       return {
         content: [
           {
@@ -240,15 +224,15 @@ server.tool(
   }
 );
 
-// Tool for getting notebook details
+// Tool: getNotebook
 server.tool(
   "getNotebook",
   "Get details of a specific notebook",
-  async (params) => {
+  async () => {
     try {
       await ensureGraphClient();
-      const response = await graphClient.api(`/me/onenote/notebooks`).get();
-      return { 
+      const response = await graphClient.api("/me/onenote/notebooks").get();
+      return {
         content: [
           {
             type: "text",
@@ -263,15 +247,15 @@ server.tool(
   }
 );
 
-// Tool for listing sections in a notebook
+// Tool: listSections
 server.tool(
   "listSections",
   "List all sections in a notebook",
-  async (params) => {
+  async () => {
     try {
       await ensureGraphClient();
-      const response = await graphClient.api(`/me/onenote/sections`).get();
-      return { 
+      const response = await graphClient.api("/me/onenote/sections").get();
+      return {
         content: [
           {
             type: "text",
@@ -286,18 +270,17 @@ server.tool(
   }
 );
 
-// Tool for listing pages in a section
+// Tool: listPages
 server.tool(
   "listPages",
   "List all pages in a section",
-  async (params) => {
+  async () => {
     try {
       await ensureGraphClient();
-      // Get sections first
-      const sectionsResponse = await graphClient.api(`/me/onenote/sections`).get();
-      
+      const sectionsResponse = await graphClient.api("/me/onenote/sections").get();
+
       if (sectionsResponse.value.length === 0) {
-        return { 
+        return {
           content: [
             {
               type: "text",
@@ -306,12 +289,11 @@ server.tool(
           ]
         };
       }
-      
-      // Use the first section
+
       const sectionId = sectionsResponse.value[0].id;
       const response = await graphClient.api(`/me/onenote/sections/${sectionId}/pages`).get();
-      
-      return { 
+
+      return {
         content: [
           {
             type: "text",
@@ -326,7 +308,7 @@ server.tool(
   }
 );
 
-// Tool for getting the content of a page
+// Tool: getPage
 server.tool(
   "getPage",
   "Get the content of a page",
@@ -334,68 +316,60 @@ server.tool(
     try {
       console.error("GetPage called with params:", params);
       await ensureGraphClient();
-      
-      // First, list all pages to find the one we want
+
       const pagesResponse = await graphClient.api('/me/onenote/pages').get();
       console.error("Got", pagesResponse.value.length, "pages");
-      
+
       let targetPage;
-      
-      // If a page ID is provided, use it to find the page
+
       if (params.random_string && params.random_string.length > 0) {
         const pageId = params.random_string;
         console.error("Looking for page with ID:", pageId);
-        
-        // Look for exact match first
+
         targetPage = pagesResponse.value.find(p => p.id === pageId);
-        
-        // If no exact match, try matching by title
+
         if (!targetPage) {
           console.error("No exact match, trying title search");
-          targetPage = pagesResponse.value.find(p => 
+          targetPage = pagesResponse.value.find(p =>
             p.title && p.title.toLowerCase().includes(params.random_string.toLowerCase())
           );
         }
-        
-        // If still no match, try partial ID match
+
         if (!targetPage) {
           console.error("No title match, trying partial ID match");
-          targetPage = pagesResponse.value.find(p => 
+          targetPage = pagesResponse.value.find(p =>
             p.id.includes(pageId) || pageId.includes(p.id)
           );
         }
       } else {
-        // If no ID provided, use the first page
         console.error("No ID provided, using first page");
         targetPage = pagesResponse.value[0];
       }
-      
+
       if (!targetPage) {
         throw new Error("Page not found");
       }
-      
+
       console.error("Target page found:", targetPage.title);
       console.error("Page ID:", targetPage.id);
-      
+
       try {
         const url = `https://graph.microsoft.com/v1.0/me/onenote/pages/${targetPage.id}/content`;
         console.error("Fetching content from:", url);
-        
-        // Make direct HTTP request with fetch
+
         const response = await fetch(url, {
           headers: {
             'Authorization': `Bearer ${accessToken}`
           }
         });
-        
+
         if (!response.ok) {
           throw new Error(`HTTP error! Status: ${response.status} ${response.statusText}`);
         }
-        
+
         const content = await response.text();
         console.error(`Content received! Length: ${content.length} characters`);
-        
-        // Return the raw HTML content
+
         return {
           content: [
             {
@@ -406,8 +380,7 @@ server.tool(
         };
       } catch (error) {
         console.error("Error getting content:", error);
-        
-        // Return a simple error message
+
         return {
           content: [
             {
@@ -431,24 +404,21 @@ server.tool(
   }
 );
 
-// Tool for creating a new page in a section
+// Tool: createPage
 server.tool(
   "createPage",
   "Create a new page in a section",
-  async (params) => {
+  async () => {
     try {
       await ensureGraphClient();
-      // Get sections first
-      const sectionsResponse = await graphClient.api(`/me/onenote/sections`).get();
-      
+      const sectionsResponse = await graphClient.api("/me/onenote/sections").get();
+
       if (sectionsResponse.value.length === 0) {
         throw new Error("No sections found");
       }
-      
-      // Use the first section
+
       const sectionId = sectionsResponse.value[0].id;
-      
-      // Create simple HTML content
+
       const simpleHtml = `
         <!DOCTYPE html>
         <html>
@@ -460,13 +430,13 @@ server.tool(
           </body>
         </html>
       `;
-      
+
       const response = await graphClient
         .api(`/me/onenote/sections/${sectionId}/pages`)
         .header("Content-Type", "application/xhtml+xml")
         .post(simpleHtml);
-      
-      return { 
+
+      return {
         content: [
           {
             type: "text",
@@ -481,29 +451,26 @@ server.tool(
   }
 );
 
-// Tool for searching pages
+// Tool: searchPages
 server.tool(
   "searchPages",
   "Search for pages across notebooks",
   async (params) => {
     try {
       await ensureGraphClient();
-      
-      // Get all pages
-      const response = await graphClient.api(`/me/onenote/pages`).get();
-      
-      // If search string is provided, filter the results
+
+      const response = await graphClient.api("/me/onenote/pages").get();
+
       if (params.random_string && params.random_string.length > 0) {
         const searchTerm = params.random_string.toLowerCase();
         const filteredPages = response.value.filter(page => {
-          // Search in title
           if (page.title && page.title.toLowerCase().includes(searchTerm)) {
             return true;
           }
           return false;
         });
-        
-        return { 
+
+        return {
           content: [
             {
               type: "text",
@@ -512,8 +479,7 @@ server.tool(
           ]
         };
       } else {
-        // Return all pages if no search term
-        return { 
+        return {
           content: [
             {
               type: "text",
@@ -529,18 +495,15 @@ server.tool(
   }
 );
 
-// Connect to stdio and start server
 async function main() {
   try {
-    // Connect to standard I/O
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    
+
     console.error('Server started successfully.');
-    console.error('Use the "authenticate" tool to start the authentication flow,');
-    console.error('or use "saveAccessToken" if you already have a token.');
-    
-    // Keep the process alive
+    console.error('Use the "authenticate" tool to sign in to OneNote.');
+    console.error('If you already signed in before, the token will be reused automatically.');
+
     process.on('SIGINT', () => {
       process.exit(0);
     });
@@ -550,4 +513,4 @@ async function main() {
   }
 }
 
-main(); 
+main();
