@@ -407,34 +407,41 @@ server.tool(
 // Tool: createPage
 server.tool(
   "createPage",
-  "Create a new page in a section",
-  async () => {
+  "Create a new page in OneNote",
+  {
+    title: z.string().describe("Page title displayed in OneNote"),
+    content: z.string().optional().describe("Optional HTML body content for the page"),
+    sectionId: z.string().optional().describe("Optional section ID; defaults to Quick Notes section")
+  },
+  async (params) => {
     try {
       await ensureGraphClient();
-      const sectionsResponse = await graphClient.api("/me/onenote/sections").get();
 
-      if (sectionsResponse.value.length === 0) {
-        throw new Error("No sections found");
+      let sectionId = params.sectionId;
+      if (!sectionId) {
+        const sectionsResponse = await graphClient.api("/me/onenote/sections").get();
+        if (sectionsResponse.value.length === 0) {
+          throw new Error("No sections found");
+        }
+        sectionId = sectionsResponse.value[0].id;
       }
 
-      const sectionId = sectionsResponse.value[0].id;
+      const bodyContent = params.content || `<p>${params.title}</p>`;
 
-      const simpleHtml = `
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>New Page</title>
-          </head>
-          <body>
-            <p>This is a new page created via the Microsoft Graph API</p>
-          </body>
-        </html>
-      `;
+      const html = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>${params.title}</title>
+  </head>
+  <body>
+    ${bodyContent}
+  </body>
+</html>`;
 
       const response = await graphClient
         .api(`/me/onenote/sections/${sectionId}/pages`)
         .header("Content-Type", "application/xhtml+xml")
-        .post(simpleHtml);
+        .post(html);
 
       return {
         content: [
