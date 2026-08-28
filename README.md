@@ -203,6 +203,29 @@ User: I want to read through all my OneNote pages so I can ask questions about t
 AI: (runs read-all-pages.js) I've retrieved the full content of all your pages in a readable format. Now you can ask me specific questions about any of the content.
 ```
 
+## Manual Token Acquisition (Graph Explorer)
+
+If you prefer to manually obtain and paste an access token (instead of the device code flow), use [Microsoft Graph Explorer](https://developer.microsoft.com/graph/graph-explorer):
+
+### Graph Explorer 界面操作
+
+1. 打开 [Graph Explorer](https://developer.microsoft.com/graph/graph-explorer)，登录你的微软账号
+2. 在 API 请求地址栏输入 `GET https://graph.microsoft.com/v1.0/me`，点击 **Run Query**
+3. 在上方标签栏点击 **Modify Permissions**（修改权限）
+4. 在权限列表搜索框输入 `Notes`，筛选 OneNote 相关权限：
+
+   | 权限 | 作用 |
+   |------|------|
+   | `Notes.ReadWrite` | **读写当前登录用户自己的 OneNote 笔记本**（最常用，个人账号首选） |
+   | `Notes.ReadWrite.All` | 读写租户内所有用户的 OneNote，需要管理员同意 |
+   | `Notes.Create` | 仅允许新建笔记本，不能读旧笔记 |
+   | `Notes.Read` | 仅只读权限 |
+
+5. 勾选 `Notes.ReadWrite`，点击 **Consent**（同意）
+6. 浏览器弹出微软登录授权窗口，使用你的 OneNote 账号确认授权
+7. 授权完成后，点击 **Access Token** 标签页，复制令牌
+8. 在 AI 对话中粘贴令牌，AI 会自动调用 `saveAccessToken` 工具保存
+
 ## Advanced: Direct Script Usage
 
 For testing or development purposes, you can also use the provided scripts directly:
