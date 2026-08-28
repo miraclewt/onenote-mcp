@@ -9,6 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import { DeviceCodeCredential } from '@azure/identity';
 import fetch from 'node-fetch';
+import { z } from 'zod';
 
 // Load environment variables
 dotenv.config();
@@ -179,28 +180,38 @@ server.tool(
   }
 );
 
-// Tool for saving an access token provided by the user
 server.tool(
   "saveAccessToken",
-  "Save a Microsoft Graph access token for later use",
+  "Save a Microsoft Graph access token for later use. Get a token from https://developer.microsoft.com/graph/graph-explorer by signing in and running GET https://graph.microsoft.com/v1.0/me, then copy the access token from the Access token tab.",
+  {
+    token: z.string().describe("Microsoft Graph access token")
+  },
   async (params) => {
     try {
-      // Save the token for future use
-      accessToken = params.random_string;
+      const token = params.token.trim();
+      const testClient = Client.initWithMiddleware({
+        authProvider: {
+          getAccessToken: async () => token
+        }
+      });
+      const me = await testClient.api("/me").get();
+
+      accessToken = token;
+      graphClient = testClient;
       const tokenData = JSON.stringify({ token: accessToken });
       fs.writeFileSync(tokenFilePath, tokenData);
-      await createGraphClient();
-      return { 
+
+      return {
         content: [
           {
             type: "text",
-            text: "Access token saved successfully"
+            text: `Access token saved successfully. Authenticated as: ${me.displayName} (${me.userPrincipalName || me.mail || "unknown email"})`
           }
         ]
       };
     } catch (error) {
       console.error("Error saving access token:", error);
-      throw new Error(`Failed to save access token: ${error.message}`);
+      throw new Error(`Failed to save access token: ${error.message}. Make sure the token is valid and has Notes permissions.`);
     }
   }
 );
