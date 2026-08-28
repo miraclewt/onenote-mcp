@@ -458,6 +458,51 @@ server.tool(
   }
 );
 
+// Tool: updatePage
+server.tool(
+  "updatePage",
+  "Update an existing OneNote page's content and title",
+  {
+    pageId: z.string().describe("The ID of the page to update"),
+    title: z.string().optional().describe("Optional new title for the page"),
+    content: z.string().describe("HTML body content for the page")
+  },
+  async (params) => {
+    try {
+      await ensureGraphClient();
+
+      const title = params.title || "Updated Page";
+
+      const html = `<!DOCTYPE html>
+<html>
+  <head>
+    <title>${title}</title>
+  </head>
+  <body>
+    ${params.content}
+  </body>
+</html>`;
+
+      const response = await graphClient
+        .api(`/me/onenote/pages/${params.pageId}/content`)
+        .header("Content-Type", "application/xhtml+xml")
+        .patch(html);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ success: true, pageId: params.pageId, title: title })
+          }
+        ]
+      };
+    } catch (error) {
+      console.error("Error updating page:", error);
+      throw new Error(`Failed to update page: ${error.message}`);
+    }
+  }
+);
+
 // Tool: searchPages
 server.tool(
   "searchPages",
