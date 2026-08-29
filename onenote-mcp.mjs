@@ -103,8 +103,15 @@ function readSavedToken() {
   return null;
 }
 
+const tokenArgIndex = process.argv.indexOf('--token');
+const tokenArg = tokenArgIndex !== -1 && tokenArgIndex + 1 < process.argv.length
+  ? process.argv[tokenArgIndex + 1]
+  : null;
+
 if (process.env.GRAPH_ACCESS_TOKEN) {
   accessToken = process.env.GRAPH_ACCESS_TOKEN;
+} else if (tokenArg) {
+  accessToken = tokenArg;
 }
 
 function initGraphClient(token) {
@@ -617,7 +624,8 @@ async function main() {
 
     console.error('Server started successfully.');
     console.error('Use the "authenticate" tool to sign in to OneNote.');
-    console.error('If you already signed in before, the token will be reused automatically.');
+    console.error('Or pass --token YOUR_TOKEN as a command-line argument to skip authentication.');
+    console.error('Tip: set GRAPH_ACCESS_TOKEN env var or --token arg in your MCP config file to avoid re-authentication.');
 
     process.on('SIGINT', () => {
       process.exit(0);
