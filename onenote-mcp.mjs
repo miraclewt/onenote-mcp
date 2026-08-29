@@ -115,6 +115,22 @@ function initGraphClient(token) {
   });
 }
 
+async function getSharedNotebookByUrl(webUrl) {
+  const url = 'https://graph.microsoft.com/v1.0/me/onenote/notebooks/getNotebookFromWebUrl';
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ webUrl })
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to get shared notebook: ${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}
+
 async function ensureGraphClient() {
   if (graphClient) return graphClient;
 
@@ -228,15 +244,24 @@ server.tool(
 server.tool(
   "getNotebook",
   "Get details of a specific notebook",
-  async () => {
+  {
+    notebookId: z.string().optional().describe("Optional notebook ID to get details of (supports both personal and shared notebooks)")
+  },
+  async (params) => {
     try {
       await ensureGraphClient();
-      const response = await graphClient.api("/me/onenote/notebooks").get();
+      let notebook;
+      if (params.notebookId) {
+        notebook = await graphClient.api(`/me/onenote/notebooks/${params.notebookId}`).get();
+      } else {
+        const response = await graphClient.api("/me/onenote/notebooks").get();
+        notebook = response.value[0];
+      }
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(response.value[0])
+            text: JSON.stringify(notebook)
           }
         ]
       };
@@ -247,14 +272,46 @@ server.tool(
   }
 );
 
+// Tool: getSharedNotebook
+server.tool(
+  "getSharedNotebook",
+  "Access a notebook shared by another user via its OneNote Web URL",
+  {
+    webUrl: z.string().describe("The OneNote Web URL of the shared notebook (e.g. https://1drv.ms/o/s/... or https://onedrive.live.com/...)")
+  },
+  async (params) => {
+    try {
+      await ensureGraphClient();
+      const notebook = await getSharedNotebookByUrl(params.webUrl);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(notebook)
+          }
+        ]
+      };
+    } catch (error) {
+      console.error("Error getting shared notebook:", error);
+      throw new Error(`Failed to get shared notebook: ${error.message}`);
+    }
+  }
+);
+
 // Tool: listSections
 server.tool(
   "listSections",
   "List all sections in a notebook",
-  async () => {
+  {
+    notebookId: z.string().optional().describe("Optional notebook ID to list sections from (supports both personal and shared notebooks)")
+  },
+  async (params) => {
     try {
       await ensureGraphClient();
-      const response = await graphClient.api("/me/onenote/sections").get();
+      const endpoint = params.notebookId
+        ? `/me/onenote/notebooks/${params.notebookId}/sections`
+        : "/me/onenote/sections";
+      const response = await graphClient.api(endpoint).get();
       return {
         content: [
           {
@@ -274,23 +331,29 @@ server.tool(
 server.tool(
   "listPages",
   "List all pages in a section",
-  async () => {
+  {
+    sectionId: z.string().optional().describe("Optional section ID to list pages from (supports both personal and shared notebook sections)")
+  },
+  async (params) => {
     try {
       await ensureGraphClient();
-      const sectionsResponse = await graphClient.api("/me/onenote/sections").get();
 
-      if (sectionsResponse.value.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "[]"
-            }
-          ]
-        };
+      let sectionId = params.sectionId;
+      if (!sectionId) {
+        const sectionsResponse = await graphClient.api("/me/onenote/sections").get();
+        if (sectionsResponse.value.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "[]"
+              }
+            ]
+          };
+        }
+        sectionId = sectionsResponse.value[0].id;
       }
 
-      const sectionId = sectionsResponse.value[0].id;
       const response = await graphClient.api(`/me/onenote/sections/${sectionId}/pages`).get();
 
       return {
